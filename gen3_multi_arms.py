@@ -18,6 +18,7 @@ from stl.mesh import Mesh
 from VelocityController import *
 import time
 import argparse
+import utils
 
 GAP = 15
 
@@ -71,8 +72,8 @@ class SimulatorVelCtrl: #a communication wrapper for MuJoCo
         self.viewer.render()
 
         # buffers
-        self.nv = nv
-        self.v_tgt = np.zeros(self.nv)
+        self.nv = nv # number of joints
+        self.v_tgt = np.zeros(len(self.sim.model.joint_names))
         self.queue = deque(maxlen=10)
         self.queue_img = deque(maxlen=10)
         self.action = action
@@ -81,7 +82,12 @@ class SimulatorVelCtrl: #a communication wrapper for MuJoCo
         self.thViewer = threading.Thread(target=self.cv2_viewer, args=())
         self.thViewer.start()
 
-        
+        # joints
+        self.robot0_joints = ["robot0:joint_1", "robot0:joint_2", "robot0:joint_3", "robot0:joint_4", "robot0:joint_5", "robot0:joint_6", "robot0:joint_7"]
+        self.robot1_joints = ["robot1:joint_1", "robot1:joint_2", "robot1:joint_3", "robot1:joint_4", "robot1:joint_5", "robot1:joint_6", "robot1:joint_7"]
+        self.robot0_actuator = ["Joint1", "Joint2", "Joint3", "Joint4", "Joint5", "Joint6", "Joint7", "JointGL", "JointGR"]
+        self.robot1_actuator = ["2_Joint1", "2_Joint2", "2_Joint3", "2_Joint4", "2_Joint5", "2_Joint6", "2_Joint7", "2_JointGL", "2_JointGR"]
+
     def generate_obj_box(self, obj, pos_table, prefix, name):
         pos_box = np.array([0.45, 0.0, pos_table[2]+0.015+0.125])
         obj.set('name', name)                
@@ -213,19 +219,45 @@ class SimulatorVelCtrl: #a communication wrapper for MuJoCo
             geom.set('condim','4')
             geom.set('margin','0.0') 
         
-    def isInHull(self, point, hull):
-        tolerance=1e-12
-        flag = all((np.dot(eq[:-1], point) + eq[-1] <= tolerance)
-            for eq in hull.equations)
-        return flag
-        
     def update_v(self):
         self.lock.acquire()
         if len(self.queue) != 0:
-            v_tgt_new = self.queue.popleft()            
-            for i in range(self.nv):
+            v_tgt_new = self.queue.popleft()
+            # print('update v_tgt to {}'.format(v_tgt_new))
+            # print('current v_tgt is {}'.format(self.v_tgt))
+            for i in range(len(self.sim.model.joint_names)):
                 self.v_tgt[i] = v_tgt_new[i]
         self.lock.release()
+
+    def init_robot_joints(self):
+        qtgt = np.array([-0.07370902, 0.18526047, -3.05346724, -1.93002792, -0.01739147, -1.04480512, 1.59032335])
+        
+        # DEBUG
+        print("total number of qpos: {}".format(self.sim.data.qpos.shape))
+        print("joint names: {}".format(self.sim.model.joint_names))
+        print("total number of joints: {}".format(len(self.sim.model.joint_names)))
+
+        self.lock1.acquire()
+        for i in range(self.nv):
+            robot0_joint_index = self.sim.model.joint_names.index(self.robot0_joints[i])
+            robot1_joint_index = self.sim.model.joint_names.index(self.robot1_joints[i])
+            self.sim.data.qpos[robot0_joint_index] = qtgt[i]
+            self.sim.data.qpos[robot1_joint_index] = qtgt[i]
+        self.lock1.release()
+
+    def create_queue(self, vtgt, robot):
+        if robot == 1:
+            q = np.zeros(len(self.sim.model.joint_names))
+            for i in range(self.nv):
+                q[self.sim.model.joint_names.index(self.robot0_joints[i])] = vtgt[i]
+            return q
+        elif robot == 2:
+            q = np.zeros(len(self.sim.model.joint_names))
+            for i in range(self.nv):
+                q[self.sim.model.joint_names.index(self.robot1_joints[i])] = vtgt[i]
+            return q
+        else:
+            return np.zeros(len(self.sim.model.joint_names))
 
     def cv2_viewer(self):
         title = "Camera Output"
@@ -234,28 +266,16 @@ class SimulatorVelCtrl: #a communication wrapper for MuJoCo
         inc_pos_v = 0.15
         inc_ang_v = 15/180*np.pi
         
-        qtgt = np.array([-0.07370902, 0.18526047, -3.05346724, -1.93002792, -0.01739147, -1.04480512, 1.59032335])
-        
-        self.lock1.acquire()
-        for i in range(7):
-            self.sim.data.qpos[i] = qtgt[i]
-            self.sim.data.qpos[i+15] = qtgt[i]
-        self.lock1.release()          
-        
         gqtgt = float(self.sim.data.ctrl[self.nv])
         self.initQpos = [self.sim.data.qpos[i] for i in range(self.sim.model.nq)]
         
         # initial speeds
         ang_v = np.array([1,0,0,0])
         pos_v = np.array([0,0,0])
-        self.twist_ee = np.array([0, 0, 0, 0, 0, 0])        
+        self.twist_ee = np.array([0, 0, 0, 0, 0, 0])  
+        v_const = 3
 
-        if self.action == "pap":
-            gqtgt = self.pick_and_place(gqtgt)
-        elif self.action == "push":
-            gqtgt = self.push(gqtgt)
-        elif self.action == "slide":
-            gqtgt, ang_v = self.slide(gqtgt)
+        robot = 1
         
         while True:
             twist_ee = self.twist_ee
@@ -344,6 +364,12 @@ class SimulatorVelCtrl: #a communication wrapper for MuJoCo
                 ang_v = np.array([1,0,0,0])
                 pos_v = np.array([0,0,0])
                 twist_ee = np.array([0, 0, 0, 0, 0, 0])
+            elif keypressed == ord('1'): # change to robot 1
+                print("change to robot 1")
+                robot = 1
+            elif keypressed == ord('2'): # change to robot 2
+                print("change to robot 2")
+                robot = 2
            
             if is_cmd_received:
                 self.twist_ee = twist_ee
@@ -352,16 +378,16 @@ class SimulatorVelCtrl: #a communication wrapper for MuJoCo
                 self.sim.data.ctrl[self.nv] = gqtgt 
                 self.sim.data.ctrl[self.nv+1] = gqtgt
                 self.lock1.release()
+
             #joint
             self.lock.acquire()                    
-            vtgt = self.velocityCtrl.get_joint_vel_worldframe(self.twist_ee, np.array(self.sim.data.qpos[0:7]), np.array(self.sim.data.qvel[0:7]))   
-            self.queue.append(vtgt)                    
+            vtgt = v_const*self.velocityCtrl.get_joint_vel_worldframe(self.twist_ee, np.array(self.sim.data.qpos[0:7]), np.array(self.sim.data.qvel[0:7]))   
+            # self.queue.append(vtgt)   
+            self.queue.append(self.create_queue(vtgt, robot))                 
             self.lock.release()
             
             self.show_image(title)
         cv2.destroyAllWindows()
-
-    def pick_and_place(self, gqtgt):
         time.sleep(3)
 
         # move down for 1 seconds
@@ -423,104 +449,6 @@ class SimulatorVelCtrl: #a communication wrapper for MuJoCo
         self.queue.append(vtgt)                    
         self.lock.release()
         return gqtgt
-    
-
-
-    def push(self, gqtgt):
-        time.sleep(3)
-
-        # move down for 1 seconds
-        self.twist_ee = np.array([0.45,0,-0.99,0,0,0])
-        t0 = time.time()
-        duration = 1
-        while time.time() - t0 < duration:
-            self.lock.acquire()
-            vtgt = self.velocityCtrl.get_joint_vel_worldframe(self.twist_ee, np.array(self.sim.data.qpos[0:7]), np.array(self.sim.data.qvel[0:7]))   
-            self.queue.append(vtgt*14)                    
-            self.lock.release()
-            time.sleep(0.1)
-
-        # close gripper
-        while gqtgt < 1.5:
-            gqtgt = gqtgt + 0.1
-            self.lock1.acquire()
-            self.sim.data.ctrl[self.nv] = gqtgt 
-            self.sim.data.ctrl[self.nv+1] = gqtgt
-            self.lock1.release()
-
-        self.twist_ee = np.array([0, 0, 0, 0, 0, 0])
-        self.lock.acquire()                    
-        vtgt = self.velocityCtrl.get_joint_vel_worldframe(self.twist_ee, np.array(self.sim.data.qpos[0:7]), np.array(self.sim.data.qvel[0:7]))   
-        self.queue.append(vtgt)                    
-        self.lock.release()
-        time.sleep(0.1)
-
-        self.twist_ee = np.array([0.99, 0, 0, 0, 0, 0])
-        t0 = time.time()
-        duration = 4
-        while time.time() - t0 < duration:
-            self.lock.acquire()
-            vtgt = self.velocityCtrl.get_joint_vel_worldframe(self.twist_ee, np.array(self.sim.data.qpos[0:7]), np.array(self.sim.data.qvel[0:7]))   
-            self.queue.append(vtgt*4)
-            self.lock.release()
-            time.sleep(0.01)
-
-        self.twist_ee = np.array([0, 0, 0, 0, 0, 0])
-        self.lock.acquire()                    
-        vtgt = self.velocityCtrl.get_joint_vel_worldframe(self.twist_ee, np.array(self.sim.data.qpos[0:7]), np.array(self.sim.data.qvel[0:7]))   
-        self.queue.append(vtgt)                    
-        self.lock.release()
-        return gqtgt
-
-    def slide(self, gqtgt):
-        time.sleep(3)   
-
-        # move down for 1 seconds
-        self.twist_ee = np.array([0.45,0,-0.99,0,0,0])
-        t0 = time.time()
-        duration = 1
-        while time.time() - t0 < duration:
-            self.lock.acquire()
-            vtgt = self.velocityCtrl.get_joint_vel_worldframe(self.twist_ee, np.array(self.sim.data.qpos[0:7]), np.array(self.sim.data.qvel[0:7]))   
-            self.queue.append(vtgt*14)                    
-            self.lock.release()
-            time.sleep(0.1)
-
-        # close gripper
-        while gqtgt < 1.5:
-            gqtgt = gqtgt + 0.1
-            self.lock1.acquire()
-            self.sim.data.ctrl[self.nv] = gqtgt 
-            self.sim.data.ctrl[self.nv+1] = gqtgt
-            self.lock1.release()
-
-        self.twist_ee = np.array([0, 0, 0, 0, 0, 0])
-        self.lock.acquire()                    
-        vtgt = self.velocityCtrl.get_joint_vel_worldframe(self.twist_ee, np.array(self.sim.data.qpos[0:7]), np.array(self.sim.data.qvel[0:7]))   
-        self.queue.append(vtgt)                    
-        self.lock.release()
-        time.sleep(0.1)
-
-        ang_v = [np.cos(-(15/180*np.pi)),0,np.sin(-(15/180*np.pi)),0]
-        axang = quat2axang(ang_v)
-        tmp = axang[3]*axang[0:3]
-        self.twist_ee = np.array([0.44, 0, 0, 0, 0, 0])
-        self.twist_ee = np.array([self.twist_ee[0],self.twist_ee[1],self.twist_ee[2],tmp[0]*3,tmp[1]*3,tmp[2]*3])
-        t0 = time.time()
-        duration = 0.9
-        while time.time() - t0 < duration:
-            self.lock.acquire()
-            vtgt = self.velocityCtrl.get_joint_vel_worldframe(self.twist_ee, np.array(self.sim.data.qpos[0:7]), np.array(self.sim.data.qvel[0:7]))   
-            self.queue.append(vtgt*32)
-            self.lock.release()
-            time.sleep(0.01)
-
-        self.twist_ee = np.array([0, 0, 0, 0, 0, 0])
-        self.lock.acquire()                    
-        vtgt = self.velocityCtrl.get_joint_vel_worldframe(self.twist_ee, np.array(self.sim.data.qpos[0:7]), np.array(self.sim.data.qvel[0:7]))   
-        self.queue.append(vtgt)                    
-        self.lock.release()
-        return gqtgt,ang_v
         
     def show_image(self, title):
         znear = 0.01
@@ -551,14 +479,22 @@ class SimulatorVelCtrl: #a communication wrapper for MuJoCo
             cv2.imshow(title, norm_image)
 
     def start(self):
+        self.init_robot_joints()
         ct = 0 
+
+        print("number of control signal: ", self.sim.data.ctrl.shape[0])
+        print("name of control signal: ", self.sim.model.actuator_names)
+        print("number of control signal: ", self.sim.model.actuator_ctrlrange)
+
         while True:
             self.lock1.acquire()
             for i in range(self.nv):
-                self.sim.data.qfrc_applied[i] = self.sim.data.qfrc_bias[i]
-                self.sim.data.qvel[i] = self.v_tgt[i]
-                self.sim.data.qfrc_applied[i+GAP] = self.sim.data.qfrc_bias[i+GAP]
-                self.sim.data.qvel[i+GAP] = self.v_tgt[i]
+                robot0_joint_index = self.sim.model.joint_names.index(self.robot0_joints[i])
+                robot1_joint_index = self.sim.model.joint_names.index(self.robot1_joints[i])
+                self.sim.data.qfrc_applied[robot0_joint_index] = self.sim.data.qfrc_bias[robot0_joint_index]
+                self.sim.data.qfrc_applied[robot1_joint_index] = self.sim.data.qfrc_bias[robot1_joint_index]
+                self.sim.data.qvel[robot0_joint_index] = self.v_tgt[robot0_joint_index]
+                self.sim.data.qvel[robot1_joint_index] = self.v_tgt[robot1_joint_index]
             if  (ct*self.sim.model.opt.timestep/0.01).is_integer():
                 self.update_v()
             ct = ct + 1
@@ -576,39 +512,6 @@ class SimulatorVelCtrl: #a communication wrapper for MuJoCo
                 self.queue_img.append(depth_img)
                 self.lockcv2.release()
             
-'''
-convert a unit quaternion to angle/axis representation
-'''                                                                                                            
-def quat2axang(q): 
-    s = np.linalg.norm(q[1:4])
-    if s >= 10*np.finfo(float).eps:#10*np.finfo(q.dtype).eps:
-        vector = q[1:4]/s
-        theta = 2*np.arctan2(s,q[0])
-    else:
-        vector = np.array([0,0,1])
-        theta = 0
-    
-    axang = np.hstack((vector,theta))
-    return axang
-    
-    
-'''
-multiply two quaternions (numpy arrays)
-'''
-def quatmultiply(q1, q2):
-    # scalar = s1*s2 - dot(v1,v2)
-    scalar = q1[0]*q2[0] - q1[1]*q2[1] - q1[2]*q2[2] - q1[3]*q2[3]
-
-    # vector = s1*v2 + s2*v1 + cross(v1,v2)
-    vector = np.array([q1[0]*q2[1], q1[0]*q2[2], q1[0]*q2[3]]) + \
-             np.array([q2[0]*q1[1], q2[0]*q1[2], q2[0]*q1[3]]) + \
-             np.array([ q1[2]*q2[3]-q1[3]*q2[2], \
-                        q1[3]*q2[1]-q1[1]*q2[3], \
-                        q1[1]*q2[2]-q1[2]*q2[1]])
-
-    rslt = np.hstack((scalar, vector))
-    return rslt
-
 '''
 from OpenAI gym
 ''' 
