@@ -49,9 +49,9 @@ class SimulatorVelCtrl: #a communication wrapper for MuJoCo
                 size_table = np.array([0.6,0.3,0.015])            
                 self.generate_obj_table(obj1,pos_table,size_table) 
                 obj3 = ET.SubElement(worldbody, "body")
-                self.generate_obj_box(obj3, pos_table, 0.1, "ConSurf1")
+                self.generate_obj_box(obj3, pos_table, 0.1, 0.2, "ConSurf1")
                 obj4 = ET.SubElement(worldbody, "body")
-                self.generate_obj_box(obj4, pos_table, -0.1, "ConSurf2")
+                self.generate_obj_box(obj4, pos_table, -0.1, -0.2, "ConSurf2")
                 self.modelStr = ET.tostring(child, encoding='utf8', method='xml').decode("utf-8") 
                 with open(os.path.join(folder + 'model' + '.xml'), 'w') as f:
                     f.write(self.modelStr)
@@ -88,10 +88,10 @@ class SimulatorVelCtrl: #a communication wrapper for MuJoCo
         self.robot0_actuator = ["Joint1", "Joint2", "Joint3", "Joint4", "Joint5", "Joint6", "Joint7", "JointGL", "JointGR"]
         self.robot1_actuator = ["2_Joint1", "2_Joint2", "2_Joint3", "2_Joint4", "2_Joint5", "2_Joint6", "2_Joint7", "2_JointGL", "2_JointGR"]
 
-    def generate_obj_box(self, obj, pos_table, prefix, name):
+    def generate_obj_box(self, obj, pos_table, prefix1, prefix2, name):
         pos_box = np.array([0.45, 0.0, pos_table[2]+0.015+0.125])
         obj.set('name', name)                
-        obj.set('pos', '{} {} {}'.format(pos_box[0], pos_box[1]+prefix, pos_box[2]))# 0.035))
+        obj.set('pos', '{} {} {}'.format(pos_box[0]+prefix2, pos_box[1]+prefix1, pos_box[2]))# 0.035))
         geom = ET.SubElement(obj, "geom")
         geom.set('name', name) 
         geom.set('type','box')
@@ -375,13 +375,22 @@ class SimulatorVelCtrl: #a communication wrapper for MuJoCo
                 self.twist_ee = twist_ee
                 #gripper
                 self.lock1.acquire()
-                self.sim.data.ctrl[self.nv] = gqtgt 
-                self.sim.data.ctrl[self.nv+1] = gqtgt
+                if robot == 1:
+                    ctrl_index = self.nv
+                else:
+                    ctrl_index = self.nv+9 # hard coded
+                self.sim.data.ctrl[ctrl_index] = gqtgt 
+                self.sim.data.ctrl[ctrl_index+1] = gqtgt
                 self.lock1.release()
 
             #joint
-            self.lock.acquire()                    
-            vtgt = v_const*self.velocityCtrl.get_joint_vel_worldframe(self.twist_ee, np.array(self.sim.data.qpos[0:7]), np.array(self.sim.data.qvel[0:7]))   
+            self.lock.acquire()
+            index = 0
+            if robot == 1:
+                index = self.sim.model.joint_names.index(self.robot0_joints[0])
+            else:
+                index = self.sim.model.joint_names.index(self.robot1_joints[0])
+            vtgt = v_const*self.velocityCtrl.get_joint_vel_worldframe(self.twist_ee, np.array(self.sim.data.qpos[index:index+7]), np.array(self.sim.data.qvel[index:index+7]))   
             # self.queue.append(vtgt)   
             self.queue.append(self.create_queue(vtgt, robot))                 
             self.lock.release()
